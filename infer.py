@@ -1,11 +1,10 @@
 import argparse
 import json
 import os
+from typing import OrderedDict
 import torch
 
-import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
 import torch.nn.functional as F
 
 from datetime import datetime
@@ -13,10 +12,10 @@ from PIL import Image
 from torch import nn
 from torchvision import datasets, transforms, models
 
-data_dir = 'flowers'
-train_dir = data_dir + '/train'
-valid_dir = data_dir + '/valid'
-test_dir = data_dir + '/test'
+data_dir = 'FlowersClassification/'
+train_dir = data_dir + 'flowers/train'
+valid_dir = data_dir + 'flowers/valid'
+test_dir = data_dir + 'flowers/test'
 
 train_transforms = transforms.Compose([transforms.RandomRotation(30),
                                        transforms.RandomResizedCrop(224),
@@ -31,8 +30,6 @@ test_transforms = transforms.Compose([transforms.Resize(255),
                                       transforms.Normalize([0.485, 0.456, 0.406],
                                                            [0.229, 0.224, 0.225])])
 
-
-
 # Load the datasets with ImageFolder
 train_data = datasets.ImageFolder(train_dir, transform=train_transforms)
 valid_data = datasets.ImageFolder(valid_dir, transform=test_transforms)
@@ -44,46 +41,28 @@ valid_loader = torch.utils.data.DataLoader(valid_data, batch_size=64)
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=64)
 
 
-class Classifier(nn.Module):
-    """Classifier model"""
-    def __init__(self, hu):
-        super().__init__()
-        self.fc1 = nn.Linear(25088, hu)
-        self.fc2 = nn.Linear(hu, 512)
-        self.fc3 = nn.Linear(512, 102)
-
-        # Dropout module with 0.2 drop probability
-        self.dropout = nn.Dropout(p=0.2)
-
-    def forward(self, x):
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.dropout(F.relu(self.fc2(x)))
-
-        # no dropout for output
-        x = F.log_softmax(self.fc3(x), dim=1)
-
-        return x
-
-
 def create_model(model_name, lr=0.003, hu=4096):
     """Create an instance of the model"""
-    if model_name == 'VGG':
-        model = models.vgg16(pretrained=True)    
-    elif model_name == 'Densenet':
-        model = models.densenet121(pretrained=True)
+    if model_name == 'vgg11':
+        model = models.vgg11(weights=models.VGG11_Weights.DEFAULT)
+        for param in model.parameters():
+            param.requires_grad = False
+        model.classifier = nn.Sequential(OrderedDict({'fc1': nn.Linear(25088, 4096),
+                                          'fc2': nn.Linear(4096, 512),
+                                          'fc3': nn.Linear(512, 102)}))
+
+    elif model_name == 'Densenet121':
+        model = models.Densenet121(pretrained=True)
+        for param in model.parameters():
+            param.requires_grad = False
+        model.classifier = nn.Sequential(OrderedDict({'fc1': nn.Linear(1024, 512),
+                                          'fc3': nn.Linear(512, 102)}))
     else:
         raise ValueError(f'Unknown model name {model_name}') 
 
-
-    # Freeze parameters
-    for param in model.parameters():
-        param.requires_grad = False
-
-    model.classifier = Classifier(hu)
     optimizer = torch.optim.Adam(model.classifier.parameters(), lr)
 
     return model, optimizer
-
 
 def train_network(checkpoint_base='FlowersClassification/checkpoints/checkpoint', model_name='vgg11', lr=0.003, hu=4096, epochs=20, device="cpu", continue_from_checkpoint=None):
     """Train the network, and provide feedback on progress"""
@@ -173,12 +152,14 @@ def train_network(checkpoint_base='FlowersClassification/checkpoints/checkpoint'
 
     print(f'Training completed, {epoch} epochs, at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
+
 def get_cat_to_name():
     """Load category labels"""
     with open('/home/andrew/Udacity/AI Programming with Python/FlowersClassification/flowers/cat_to_name.json', 'r') as f:
         raw_file = json.load(f)
     print(f'Number of flower labels: {len(raw_file)}')
     return raw_file
+
 
 def save_checkpoint(model, model_name, optimizer, epoch, train_loss, validation_loss, validation_accuracy, filepath):
     # Save a checkpoint
@@ -226,29 +207,12 @@ def process_image(img_file):
     return img_tensor
 
 
-def imshow(img_file, probabilities, indices, cat_to_name, label):
-    """Show image and predictions"""
-    img = mpimg.imread(img_file)
-
-    # Create axes to show image and predictions
-    fig, (ax1, ax2) = plt.subplots(nrows=2)
-    plt.title(label)
-    ax1.imshow(img)
-    idx_to_class = dict((v, k) for k, v in train_data.class_to_idx.items())
-    names = [f'{cat_to_name[idx_to_class[i]]}' for i in indices]
-    y_ticks = np.arange(5)
-    ax2.set_yticks(y_ticks)
-    ax2.set_yticklabels(names)
-    ax2.barh(y_ticks, probabilities)
-    plt.tight_layout()
-    plt.show()
-    plt.close()
-
-
-def predict(img_file, model, topk):
+def predict(img_file, model, topk, device):
     """Predict the class (or classes) of an image using a trained deep learning model"""
     img = process_image(img_file)
     img = img.float().unsqueeze_(0)
+
+    model.to(device)
 
     with torch.no_grad():
         model.eval()
@@ -256,11 +220,14 @@ def predict(img_file, model, topk):
         ps = F.softmax(output.data, dim=1)
         probability, index = ps.topk(topk)
 
-    return probability.reshape(-1).numpy(), index.reshape(-1).numpy()
+    idx_to_class = dict((v, k) for k, v in train_data.class_to_idx.items())
+    prediction = list(idx_to_class[i] for i in index.reshape(-1).numpy())
+
+    return probability.reshape(-1).numpy(), prediction
 
 
 def get_one_of_each_flower():
-    root = 'flowers/test/'
+    root = data_dir + 'flowers/test/'
     ret = {}
     for folder in os.listdir(root):
         contents = os.listdir(root + folder)
@@ -270,25 +237,33 @@ def get_one_of_each_flower():
     return ret
 
 
-def infer(checkpoint, img_files, topk):
+def infer(checkpoint, img_files, topk, category_names, device):
     model, model_name, optmizer, epoch, train_loss, validation_loss, validation_accuracy = load_checkpoint(checkpoint)
-    cat_to_name = get_cat_to_name()
+    with open(data_dir + category_names, 'r') as f:
+        cat_to_name = json.load(f, strict=False)
+
     for label in img_files:
-        probabilities, indices = predict(img_files[label], model, topk)
-        imshow(img_files[label], probabilities, indices, cat_to_name, cat_to_name[label])
+        probabilities, prediction = predict(img_files[label], model, topk, device)
+        for i in range(topk):
+            print(f'{i} {probabilities[i]} {cat_to_name[prediction[i]]}')
 
 
-parser = argparse.ArgumentParser("train from checkpoint")
-parser.add_argument('--checkpoint', default='checkpoints/checkpoint20.pth', help='file name (including path) to checkpoint')
-parser.add_argument('--infer_image', help='file name (including path) to image for inference')
-parser.add_argument('-infer_one_of_each', default=True, action='store_true')
-args = parser.parse_args()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser("infer")
+    parser.add_argument('--checkpoint', default='checkpoints/checkpoint20.pth', help='file name (including path) to checkpoint')
+    parser.add_argument('--topk', help='the number of top inference classes to show when testing each image')
+    parser.add_argument('--category_names', help='name of file containing category names')
+    parser.add_argument('-gpu', action='store_true', help='use cuda')
+    parser.add_argument('--infer_image', help='file name (including path) to image for inference')
+    parser.add_argument('-infer_one_of_each', action='store_true')
+    args = parser.parse_args()
 
-if args.infer_image:
-    label = args.infer_image.split('/')[-2]
-    infer(args.checkpoint, {label: args.infer_image})
+    device = torch.device('cuda' if torch.cuda.is_available() and args.gpu else 'cpu')
 
-elif args.infer_one_of_each:
-    img_files = get_one_of_each_flower()
-    infer(args.checkpoint, img_files)
+    if args.infer_image:
+        label = args.infer_image.split('/')[-2]
+        infer(data_dir + args.checkpoint, {label: args.infer_image}, int(args.topk), args.category_names, device)
 
+    elif args.infer_one_of_each:
+        img_files = get_one_of_each_flower()
+        infer(data_dir + args.checkpoint, img_files, int(args.topk), args.category_names, device)

@@ -1,6 +1,7 @@
 import argparse
 import json
 import os
+from typing import OrderedDict
 import torch
 
 import numpy as np
@@ -13,10 +14,10 @@ from PIL import Image
 from torch import nn
 from torchvision import datasets, transforms, models
 
-data_dir = 'flowers'
-train_dir = data_dir + '/train'
-valid_dir = data_dir + '/valid'
-test_dir = data_dir + '/test'
+train_dir = 'flowers/train'
+valid_dir = 'flowers/valid'
+test_dir = 'flowers/test'
+
 
 train_transforms = transforms.Compose([transforms.RandomRotation(30),
                                        transforms.RandomResizedCrop(224),
@@ -32,7 +33,6 @@ test_transforms = transforms.Compose([transforms.Resize(255),
                                                            [0.229, 0.224, 0.225])])
 
 
-
 # Load the datasets with ImageFolder
 train_data = datasets.ImageFolder(train_dir, transform=train_transforms)
 valid_data = datasets.ImageFolder(valid_dir, transform=test_transforms)
@@ -44,53 +44,32 @@ valid_loader = torch.utils.data.DataLoader(valid_data, batch_size=64)
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=64)
 
 
-class Classifier(nn.Module):
-    """Classifier model"""
-    def __init__(self, hu):
-        super().__init__()
-        self.fc1 = nn.Linear(25088, hu)
-        self.fc2 = nn.Linear(hu, 512)
-        self.fc3 = nn.Linear(512, 102)
-
-        # Dropout module with 0.2 drop probability
-        self.dropout = nn.Dropout(p=0.2)
-
-    def forward(self, x):
-        x = self.dropout(F.relu(self.fc1(x)))
-        x = self.dropout(F.relu(self.fc2(x)))
-
-        # no dropout for output
-        x = F.log_softmax(self.fc3(x), dim=1)
-
-        return x
-
-
 def create_model(model_name, lr=0.003, hu=4096):
     """Create an instance of the model"""
     if model_name == 'VGG':
-        model = models.vgg16(pretrained=True)    
-    elif model_name == 'Densenet':
-        model = models.densenet121(pretrained=True)
+        model = models.vgg11(weights=models.VGG11_Weights.DEFAULT)
+        model.fc = nn.Sequential(nn.Linear(25088, hu),
+                       nn.ReLU(),
+                       nn.Dropout(p=0.3),
+                       nn.Linear(hu, 102),
+                       nn.LogSoftmax(dim=2))
 
+    elif model_name == 'Densenet121':
+        model = models.Densenet121(pretrained=True)
+        for param in model.parameters():
+            param.requires_grad = False
+        model.classifier = nn.Sequential(OrderedDict({'fc1': nn.Linear(1024, 512),
+                                                      'fc3': nn.Linear(512, 102)}))
     else:
         raise ValueError(f'Unknown model name {model_name}') 
 
-    # Freeze parameters
-    for param in model.parameters():
-        param.requires_grad = False
-
-    model.classifier = Classifier(hu)
     optimizer = torch.optim.Adam(model.classifier.parameters(), lr)
 
     return model, optimizer
 
 
-def train_network(gpu, checkpoint_base='FlowersClassification/checkpoints/checkpoint', model_name='vgg11', lr=0.003, hu=4096, epochs=20, continue_from_checkpoint=None):
+def train_network(device, checkpoint_base='FlowersClassification/checkpoints/checkpoint', model_name='vgg11', lr=0.003, hu=4096, epochs=20, continue_from_checkpoint=None):
     """Train the network, and provide feedback on progress"""
-    if gpu:
-        device = 'cuda'
-    else:
-        device = 'cpu'
 
     if continue_from_checkpoint is not None:
         model, model_name, optimizer, epoch, train_loss, validation_loss, validation_accuracy = load_checkpoint(continue_from_checkpoint, lr, hu)
@@ -125,7 +104,7 @@ def train_network(gpu, checkpoint_base='FlowersClassification/checkpoints/checkp
             inputs, labels = inputs.to(device), labels.to(device)
 
             optimizer.zero_grad()
-            logps = model.forward(inputs)
+            logps = model(inputs)
             loss = criterion(logps, labels)
             loss.backward()
             optimizer.step()
@@ -177,12 +156,6 @@ def train_network(gpu, checkpoint_base='FlowersClassification/checkpoints/checkp
 
     print(f'Training completed, {epoch} epochs, at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
-def get_cat_to_name():
-    """Load category labels"""
-    with open('/home/andrew/Udacity/AI Programming with Python/FlowersClassification/flowers/cat_to_name.json', 'r') as f:
-        raw_file = json.load(f)
-    print(f'Number of flower labels: {len(raw_file)}')
-    return raw_file
 
 def save_checkpoint(model, model_name, optimizer, epoch, train_loss, validation_loss, validation_accuracy, filepath):
     # Save a checkpoint
@@ -255,26 +228,21 @@ def get_one_of_each_flower():
     return ret
 
 
-def infer(checkpoint, img_files):
-    model, model_name, optmizer, epoch, train_loss, validation_loss, validation_accuracy = load_checkpoint(checkpoint)
-    cat_to_name = get_cat_to_name()
-    for label in img_files:
-        probabilities, indices = predict(img_files[label], model)
-        imshow(img_files[label], probabilities, indices, cat_to_name, cat_to_name[label])
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser("train from checkpoint")
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument('--checkpoint', help='file name (including path) to checkpoint')
+    group.add_argument('--model_name', help='name of the model (vgg11 or vgg16)')
+    parser.add_argument('--learning_rate', help='learning rate for model training')
+    parser.add_argument('--hidden_units', help='number of hidden units for model training')
+    parser.add_argument('--epochs', help='number of epochs for model training')
+    parser.add_argument('-gpu', action='store_true', help='use cuda')
+    args = parser.parse_args()
 
+    device = torch.device('cuda' if torch.cuda.is_available() and args.gpu else 'cpu')
 
-parser = argparse.ArgumentParser("train from checkpoint")
-group = parser.add_mutually_exclusive_group(required=True)
-group.add_argument('--checkpoint', help='file name (including path) to checkpoint')
-group.add_argument('--model_name', help='name of the model (vgg11 or vgg16)')
-parser.add_argument('--learning_rate', help='learning rate for model training')
-parser.add_argument('--hidden_units', help='number of hidden units for model training')
-parser.add_argument('--epochs', help='number of epochs for model training')
-parser.add_argument('-gpu', default=True, action='store_true', help='use cuda')
-args = parser.parse_args()
+    if args.model_name is not None:
+        train_network(device, model_name=args.model_name)
 
-if args.model_name is not None:
-    train_network(gpu=args.gpu, model_name=args.model_name)
-
-elif args.checkpoint is not None:
-    train_network(gpu=args.gpu, continue_from_checkpoint=args.checkpoint)
+    elif args.checkpoint is not None:
+        train_network(device, continue_from_checkpoint=args.checkpoint)
