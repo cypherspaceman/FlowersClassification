@@ -1,12 +1,8 @@
 import argparse
-import json
-import os
 from typing import OrderedDict
 import torch
 
-import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.image as mpimg
 import torch.nn.functional as F
 
 from datetime import datetime
@@ -44,31 +40,32 @@ valid_loader = torch.utils.data.DataLoader(valid_data, batch_size=64)
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=64)
 
 
-def create_model(model_name, lr=0.003, hu=4096):
+def create_model(model_name, lr, hu):
     """Create an instance of the model"""
     if model_name == 'VGG':
         model = models.vgg11(weights=models.VGG11_Weights.DEFAULT)
-        model.fc = nn.Sequential(nn.Linear(25088, hu),
-                       nn.ReLU(),
-                       nn.Dropout(p=0.3),
-                       nn.Linear(hu, 102),
-                       nn.LogSoftmax(dim=2))
-
-    elif model_name == 'Densenet121':
-        model = models.Densenet121(pretrained=True)
         for param in model.parameters():
             param.requires_grad = False
-        model.classifier = nn.Sequential(OrderedDict({'fc1': nn.Linear(1024, 512),
-                                                      'fc3': nn.Linear(512, 102)}))
+        model.classifier = nn.Sequential(nn.Linear(25088, hu),
+                                         nn.ReLU(),
+                                         nn.Dropout(p=0.3),
+                                         nn.Linear(hu, 102),
+                                         nn.LogSoftmax(dim=1))
+    elif model_name == 'DENSENET':
+        model = models.densenet121(pretrained=True)
+        for param in model.parameters():
+            param.requires_grad = False
+        model.classifier = nn.Sequential(OrderedDict({'fc1': nn.Linear(1024, hu),
+                                                      'fc3': nn.Linear(hu, 102)}))
     else:
-        raise ValueError(f'Unknown model name {model_name}') 
+        raise ValueError(f'Unknown model name {model_name}')
 
     optimizer = torch.optim.Adam(model.classifier.parameters(), lr)
 
     return model, optimizer
 
 
-def train_network(device, checkpoint_base='FlowersClassification/checkpoints/checkpoint', model_name='vgg11', lr=0.003, hu=4096, epochs=20, continue_from_checkpoint=None):
+def train_network(device, checkpoint_base='checkpoints/checkpoint', model_name='VGG', lr=0.003, hu=4096, epochs=20, continue_from_checkpoint=None):
     """Train the network, and provide feedback on progress"""
 
     if continue_from_checkpoint is not None:
@@ -122,7 +119,7 @@ def train_network(device, checkpoint_base='FlowersClassification/checkpoints/che
                 validation_batch += 1
 
                 inputs, labels = inputs.to(device), labels.to(device)
-                logps = model.forward(inputs)
+                logps = model(inputs)
                 batch_loss = criterion(logps, labels)
 
                 valid_loss += batch_loss.item()
@@ -140,9 +137,9 @@ def train_network(device, checkpoint_base='FlowersClassification/checkpoints/che
               f'Validation loss: {valid_loss/validation_batch:.3f}.. '
               f'Validation accuracy: {accuracy * 100 / validation_batch:.3f}%')
 
-        train_loss.append(running_loss/batch)
-        validation_loss.append(valid_loss/validation_batch)
-        validation_accuracy.append(accuracy * 100/validation_batch)
+        train_loss.append(running_loss / batch)
+        validation_loss.append(valid_loss / validation_batch)
+        validation_accuracy.append(accuracy * 100 / validation_batch)
         ax1.plot(train_loss[2:], color='blue', label='Training loss' if epoch == 0 else '')
         ax1.plot(validation_loss[2:], color='red', label='Validation loss' if epoch == 0 else '')
         ax2.plot(validation_accuracy[2:], color='green', label='Validation accuracy %' if epoch == 0 else '')
@@ -154,7 +151,7 @@ def train_network(device, checkpoint_base='FlowersClassification/checkpoints/che
 
         save_checkpoint(model, model_name, optimizer, epoch, train_loss, validation_loss, validation_accuracy, f'{checkpoint_base}{epoch+1}.pth')
 
-    print(f'Training completed, {epoch} epochs, at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
+        print(f'Training completed, {epoch+1} epochs, at {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
 
 
 def save_checkpoint(model, model_name, optimizer, epoch, train_loss, validation_loss, validation_accuracy, filepath):
@@ -210,23 +207,11 @@ def predict(img_file, model, topk=5):
 
     with torch.no_grad():
         model.eval()
-        output = model.forward(img)
+        output = model(img)
         ps = F.softmax(output.data, dim=1)
         probability, index = ps.topk(topk)
 
     return probability.reshape(-1).numpy(), index.reshape(-1).numpy()
-
-
-def get_one_of_each_flower():
-    root = 'flowers/test/'
-    ret = {}
-    for folder in os.listdir(root):
-        contents = os.listdir(root + folder)
-        if len(contents) > 0:
-            ret[folder] = root + folder + "/" + contents[0]
-
-    return ret
-
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser("train from checkpoint")

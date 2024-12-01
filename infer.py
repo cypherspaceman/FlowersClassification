@@ -12,10 +12,9 @@ from PIL import Image
 from torch import nn
 from torchvision import datasets, transforms, models
 
-data_dir = 'FlowersClassification/'
-train_dir = data_dir + 'flowers/train'
-valid_dir = data_dir + 'flowers/valid'
-test_dir = data_dir + 'flowers/test'
+train_dir = 'flowers/train'
+valid_dir = 'flowers/valid'
+test_dir = 'flowers/test'
 
 train_transforms = transforms.Compose([transforms.RandomRotation(30),
                                        transforms.RandomResizedCrop(224),
@@ -41,30 +40,28 @@ valid_loader = torch.utils.data.DataLoader(valid_data, batch_size=64)
 test_loader = torch.utils.data.DataLoader(test_data, batch_size=64)
 
 
-def create_model(model_name, lr=0.003, hu=4096):
+def create_model(model_name, lr, hu):
     """Create an instance of the model"""
-    if model_name == 'vgg11':
+    if model_name == 'VGG':
         model = models.vgg11(weights=models.VGG11_Weights.DEFAULT)
-        for param in model.parameters():
-            param.requires_grad = False
-        model.classifier = nn.Sequential(OrderedDict({'fc1': nn.Linear(25088, 4096),
-                                          'fc2': nn.Linear(4096, 512),
-                                          'fc3': nn.Linear(512, 102)}))
-
-    elif model_name == 'Densenet121':
-        model = models.Densenet121(pretrained=True)
-        for param in model.parameters():
-            param.requires_grad = False
-        model.classifier = nn.Sequential(OrderedDict({'fc1': nn.Linear(1024, 512),
-                                          'fc3': nn.Linear(512, 102)}))
+        model.classifier = nn.Sequential(nn.Linear(25088, hu),
+                                         nn.ReLU(),
+                                         nn.Dropout(p=0.3),
+                                         nn.Linear(hu, 102),
+                                         nn.LogSoftmax(dim=1))
+    elif model_name == 'DENSENET':
+        model = models.densenet121(pretrained=True)
+        model.classifier = nn.Sequential(OrderedDict({'fc1': nn.Linear(1024, hu),
+                                                      'fc3': nn.Linear(hu, 102)}))
     else:
-        raise ValueError(f'Unknown model name {model_name}') 
+        raise ValueError(f'Unknown model name {model_name}')
 
     optimizer = torch.optim.Adam(model.classifier.parameters(), lr)
 
     return model, optimizer
 
-def train_network(checkpoint_base='FlowersClassification/checkpoints/checkpoint', model_name='vgg11', lr=0.003, hu=4096, epochs=20, device="cpu", continue_from_checkpoint=None):
+
+def train_network(checkpoint_base='checkpoints/checkpoint', model_name='vgg11', lr=0.003, hu=4096, epochs=20, device="cpu", continue_from_checkpoint=None):
     """Train the network, and provide feedback on progress"""
 
     if continue_from_checkpoint is not None:
@@ -100,7 +97,7 @@ def train_network(checkpoint_base='FlowersClassification/checkpoints/checkpoint'
             inputs, labels = inputs.to(device), labels.to(device)
 
             optimizer.zero_grad()
-            logps = model.forward(inputs)
+            logps = model(inputs)
             loss = criterion(logps, labels)
             loss.backward()
             optimizer.step()
@@ -118,7 +115,7 @@ def train_network(checkpoint_base='FlowersClassification/checkpoints/checkpoint'
                 validation_batch += 1
 
                 inputs, labels = inputs.to(device), labels.to(device)
-                logps = model.forward(inputs)
+                logps = model(inputs)
                 batch_loss = criterion(logps, labels)
 
                 valid_loss += batch_loss.item()
@@ -136,9 +133,9 @@ def train_network(checkpoint_base='FlowersClassification/checkpoints/checkpoint'
               f'Validation loss: {valid_loss/validation_batch:.3f}.. '
               f'Validation accuracy: {accuracy * 100 / validation_batch:.3f}%')
 
-        train_loss.append(running_loss/batch)
-        validation_loss.append(valid_loss/validation_batch)
-        validation_accuracy.append(accuracy * 100/validation_batch)
+        train_loss.append(running_loss / batch)
+        validation_loss.append(valid_loss / validation_batch)
+        validation_accuracy.append(accuracy * 100 / validation_batch)
         ax1.plot(train_loss[2:], color='blue', label='Training loss' if epoch == 0 else '')
         ax1.plot(validation_loss[2:], color='red', label='Validation loss' if epoch == 0 else '')
         ax2.plot(validation_accuracy[2:], color='green', label='Validation accuracy %' if epoch == 0 else '')
@@ -174,12 +171,12 @@ def save_checkpoint(model, model_name, optimizer, epoch, train_loss, validation_
     torch.save(checkpoint, filepath)
 
 
-def load_checkpoint(filepath, learning_rate=0.003, hidden_units=4096):
+def load_checkpoint(filepath, learning_rate=0.0005, hidden_units=4096):
     checkpoint = torch.load(filepath)
     if 'model_name' in checkpoint:
         model_name = checkpoint['model_name']
     else:
-        model_name = 'vgg11'
+        model_name = 'VGG'
 
     # Create model
     model, optimizer = create_model(model_name, lr=learning_rate, hu=hidden_units)
@@ -216,7 +213,7 @@ def predict(img_file, model, topk, device):
 
     with torch.no_grad():
         model.eval()
-        output = model.forward(img)
+        output = model(img)
         ps = F.softmax(output.data, dim=1)
         probability, index = ps.topk(topk)
 
@@ -227,7 +224,7 @@ def predict(img_file, model, topk, device):
 
 
 def get_one_of_each_flower():
-    root = data_dir + 'flowers/test/'
+    root = 'flowers/test/'
     ret = {}
     for folder in os.listdir(root):
         contents = os.listdir(root + folder)
@@ -239,13 +236,13 @@ def get_one_of_each_flower():
 
 def infer(checkpoint, img_files, topk, category_names, device):
     model, model_name, optmizer, epoch, train_loss, validation_loss, validation_accuracy = load_checkpoint(checkpoint)
-    with open(data_dir + category_names, 'r') as f:
+    with open(category_names, 'r') as f:
         cat_to_name = json.load(f, strict=False)
 
     for label in img_files:
         probabilities, prediction = predict(img_files[label], model, topk, device)
         for i in range(topk):
-            print(f'{i} {probabilities[i]} {cat_to_name[prediction[i]]}')
+            print(f'{i + 1} {probabilities[i]:.3f} {cat_to_name[prediction[i]]}')
 
 
 if __name__ == '__main__':
@@ -262,8 +259,8 @@ if __name__ == '__main__':
 
     if args.infer_image:
         label = args.infer_image.split('/')[-2]
-        infer(data_dir + args.checkpoint, {label: args.infer_image}, int(args.topk), args.category_names, device)
+        infer(args.checkpoint, {label: args.infer_image}, int(args.topk), args.category_names, device)
 
     elif args.infer_one_of_each:
         img_files = get_one_of_each_flower()
-        infer(data_dir + args.checkpoint, img_files, int(args.topk), args.category_names, device)
+        infer(args.checkpoint, img_files, int(args.topk), args.category_names, device)
